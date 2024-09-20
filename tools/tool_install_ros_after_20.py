@@ -1,0 +1,313 @@
+"""
+This tool install ROS1 on systems after Ubuntu 20.04
+
+Written by: Elysia
+"""
+from pickle import NONE
+from .base import BaseTool
+from .base import PrintUtils,CmdTask,FileUtils,AptUtils,ChooseTask
+from .base import osversion
+from .base import run_tool_file
+from .base import tr
+
+class RosVersion:
+    STATUS_EOL = 0
+    STATUS_LTS = 1
+    def __init__(self,name,version,status,deps=[]):
+        self.name = name
+        self.version = version
+        self.status = status
+        self.deps = deps
+
+class RosVersions:
+    ros_version = [
+        RosVersion('noetic',  'ROS1', RosVersion.STATUS_LTS, ['python3-catkin-tools','python3-rosdep']),
+    ]
+
+    @staticmethod
+    def get_version_string(name):
+        for version in RosVersions.ros_version:
+            if version.name == name:
+                return "{}({})".format(version.name,version.version)
+
+    @staticmethod
+    def get_version(name):
+        for version in RosVersions.ros_version:
+            if version.name == name:
+                return version
+       
+    @staticmethod
+    def install_depend(name):
+        depends = RosVersions.get_version(name).deps
+        for dep in depends:
+            AptUtils.install_pkg(dep)
+
+
+    @staticmethod
+    def tip_test_command(name):
+        version = RosVersions.get_version(name).version
+        if version=="ROS1":
+            PrintUtils.print_warn("小鱼，黄黄的提示：您安装的是ROS1，可以打开一个新的终端输入roscore测试！")
+        elif version=="ROS2":
+            PrintUtils.print_warn("小鱼：黄黄的提示：您安装的是ROS2,ROS2是没有roscore的，请打开新终端输入ros2测试！小鱼制作了ROS2课程，关注公众号《鱼香ROS》即可获取~")
+
+    @staticmethod
+    def get_desktop_version(name):
+        version = RosVersions.get_version(name).version
+        if version=="ROS1":
+            return "ros-{}-desktop-full".format(name)
+        elif version=="ROS2":
+            return "ros-{}-desktop".format(name)
+
+class Tool(BaseTool):
+    def __init__(self):
+        self.name = "一键在Ubuntu22.04和24.04安装ROS1，目前仅支持AMD64"
+        self.type = BaseTool.TYPE_INSTALL
+        self.author = 'Elysia'
+
+
+    def add_key(self):
+        PrintUtils.print_success(tr.tr('============正在添加ROS源密钥================='))
+        # check apt
+        if not AptUtils.checkapt(): 
+            pass
+        # install dep
+        AptUtils.install_pkg('curl')
+        AptUtils.install_pkg('gnupg2')
+
+        if osversion.get_codename() == 'jammy':
+            pass
+        elif osversion.get_codename() == 'noble':
+            pass
+
+        # add key
+        PrintUtils.print_success(tr.tr('正在挑选最快的密钥服务:{}').format(key_urls))
+        key_url = AptUtils.get_fast_url(key_urls)
+        if not key_url: 
+            PrintUtils.print_error(tr.tr("获取密钥失败"))
+            return
+        key_url = key_url[0]
+        PrintUtils.print_success(tr.tr('已自动选择最快密钥服务:{}').format(key_url))
+
+        cmd_result = CmdTask("curl -s {} | sudo apt-key add -".format(key_url)).run()
+        if cmd_result[0]!=0: 
+            cmd_result = CmdTask("curl -s {} | sudo apt-key add -".format(key_url)).run()
+            
+        if cmd_result[0]!=0:
+            PrintUtils.print_info(tr.tr("导入密钥失败，开始更换导入方式并二次尝试..."))
+            cmd_result = CmdTask("sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F42ED6FBAB17C654",10).run()
+
+        # 针对trusted.gpg.d问题解决方案
+        if FileUtils.check_result(cmd_result,['trusted.gpg.d']):
+            cmd_result = CmdTask("curl -s {} | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/ros.gpg --import".format(key_url)).run()
+            cmd_result = CmdTask("sudo chmod 644 /etc/apt/trusted.gpg.d/ros.gpg",10).run()
+
+        return cmd_result
+
+
+    def check_sys_source(self):
+        # 更换系统源
+        dic = {1:"更换系统源再继续安装",2:"不更换继续安装"}
+        PrintUtils.print_warn("=========接下来这一步很很很很重要，如果不知道怎么选请选择1========")
+        code,result = ChooseTask(dic, "新手或首次安装一定要一定要一定要换源并清理三方源，换源!!!系统默认国外源容易失败!!").run()
+        if code==1: 
+            tool = run_tool_file('tools.tool_config_system_source',authorun=False)
+            tool.change_sys_source()
+
+    def get_all_instsll_ros_pkgs(self):
+        AptUtils.checkapt()
+        dic_base = AptUtils.search_package('ros-base','ros-[A-Za-z]+-ros-base',"ros-","-base")
+        if dic_base== None: return None
+        ros_name = {}
+        for a in dic_base.keys(): 
+            ros_name[RosVersions.get_version_string(a)] = a
+        if len(ros_name) == 0:
+            return None
+        return ros_name
+
+    def add_source(self):
+        """
+        检查并添加ROS系统源
+        """
+        arch = AptUtils.getArch()
+        if arch==None: return False
+
+        #add source 1
+        mirrors = self.get_mirror_by_code(osversion.get_codename(),arch=arch)
+        PrintUtils.print_info("根据您的系统，为您推荐安装源为{}".format(mirrors))
+        source_data = ''
+        for mirror in mirrors:
+            source_data += 'deb [arch={}]  {} {} main\n'.format(arch,mirror,osversion.get_codename())
+        FileUtils.delete('/etc/apt/sources.list.d/ros-fish.list')
+        FileUtils.new('/etc/apt/sources.list.d/',"ros-fish.list",source_data)
+
+        ros_pkg = self.get_all_instsll_ros_pkgs()
+        if ros_pkg and len(ros_pkg)>1:
+            PrintUtils.print_success("恭喜，成功添加ROS源，接下来可以使用apt安装ROS或者使用[1]一键安装ROS安装！") 
+            return
+        
+        #add source2 
+        PrintUtils.print_warn("换源后更新失败，第二次开始切换源，尝试更换ROS2源为华为源！") 
+        mirrors = self.get_mirror_by_code(osversion.get_codename(),arch=arch,first_choose="huawei")
+        PrintUtils.print_info("根据您的系统，为您推荐安装源为{}".format(mirrors))
+        source_data = ''
+        for mirror in mirrors:
+            source_data += 'deb [arch={}]  {} {} main\n'.format(arch,mirror,osversion.get_codename())
+        FileUtils.delete('/etc/apt/sources.list.d/ros-fish.list')
+        FileUtils.new('/etc/apt/sources.list.d/',"ros-fish.list",source_data)
+        ros_pkg = self.get_all_instsll_ros_pkgs()
+        if ros_pkg and len(ros_pkg)>1:
+            PrintUtils.print_success("恭喜，成功添加ROS源，接下来可以使用apt安装ROS或者使用[1]一键安装ROS安装！") 
+            return
+
+
+        PrintUtils.print_warn("换源后更新失败，第三次开始切换源，尝试使用https-ROS官方源～！") 
+        mirrors = self.get_mirror_by_code(osversion.get_codename(),arch=arch,first_choose="https.packages.ros")
+        PrintUtils.print_info("根据您的系统，为您推荐安装源为{}".format(mirrors))
+        source_data = ''
+        for mirror in mirrors:
+            source_data += 'deb [arch={}]  {} {} main\n'.format(arch,mirror,osversion.get_codename())
+        FileUtils.delete('/etc/apt/sources.list.d/ros-fish.list')
+        FileUtils.new('/etc/apt/sources.list.d/',"ros-fish.list",source_data)
+        ros_pkg = self.get_all_instsll_ros_pkgs()
+        if ros_pkg and len(ros_pkg)>1:
+            PrintUtils.print_success("恭喜，成功添加ROS源，接下来可以使用apt安装ROS或者使用[1]一键安装ROS安装！") 
+            return
+
+        #add source2 
+        PrintUtils.print_warn("换源后更新失败，第四次开始切换源，尝试更换ROS源为http-ROS官方源！") 
+        mirrors = self.get_mirror_by_code(osversion.get_codename(),arch=arch,first_choose="packages.ros")
+        PrintUtils.print_info("根据您的系统，为您推荐安装源为{}".format(mirrors))
+        source_data = ''
+        for mirror in mirrors:
+            source_data += 'deb [arch={}]  {} {} main\n'.format(arch,mirror,osversion.get_codename())
+        FileUtils.delete('/etc/apt/sources.list.d/ros-fish.list')
+        FileUtils.new('/etc/apt/sources.list.d/',"ros-fish.list",source_data)
+        ros_pkg = self.get_all_instsll_ros_pkgs()
+        if ros_pkg and len(ros_pkg)>1:
+            PrintUtils.print_success("恭喜，成功添加ROS源，接下来可以使用apt安装ROS或者使用[1]一键安装ROS安装！") 
+            return
+
+        # echo >>/etc/apt/apt.conf.d/99verify-peer.conf "Acquire { https::Verify-Peer false }"
+        if  not AptUtils.checkapt(): PrintUtils.print_error("四次换源后都失败了，请及时联系小鱼获取解决方案并处理！") 
+
+
+    def support_install(self):
+        # check support
+        if (osversion.get_codename() not in ros_dist_dic.keys()) and (osversion.get_codename() not in ros2_dist_dic.keys()):
+            PrintUtils.print_error("小鱼:检测当前系统{}{}:{} 暂不支持一键安装ROS,请关注公众号《鱼香ROS》获取帮助.".format(osversion.get_name(), osversion.get_version(),osversion.get_codename()))
+            return False
+        PrintUtils.print_success("小鱼:检测当前系统{}{}:{} 支持一键安装ROS".format(osversion.get_name(), osversion.get_version(),osversion.get_codename()))
+        return True
+
+    def install_success(self,name):
+        """
+        检查某个版本的ROS是否安装成功
+        """
+        result = CmdTask("ls /opt/ros/{}/setup.bash".format(name), 0).run()
+        if str(result[1]).find('setup.bash') >= 1:
+            return True
+        return False
+
+    
+
+    def choose_and_install_ros(self):
+        # search ros packages
+        dic_base = AptUtils.search_package('ros-base','ros-[A-Za-z]+-ros-base',"ros-","-base")
+        if dic_base== None: return False
+
+        ros_name = {}
+        for a in dic_base.keys(): 
+            ros_name[RosVersions.get_version_string(a)] = a
+
+        code,rosname = ChooseTask(ros_name.keys(),"请选择你要安装的ROS版本名称(请注意ROS1和ROS2区别):",True).run()
+        if code==0: 
+            PrintUtils.print_error("你选择退出")
+            PrintUtils.print_delay('是因为没有自己想要的ROS版本吗？ROS版本和操作系统版本是有对应关系的哦，所以可能是你的系统版本{}不对!具体请查看：https://fishros.org.cn/forum/topic/96'.format(str(str(osversion.get_name())+str(osversion.get_version()))))
+            return
+        version_dic = {1:rosname+"桌面版",2:rosname+"基础版(小)"}
+        code,name = ChooseTask(version_dic,"请选择安装的具体版本(如果不知道怎么选,请选1桌面版):",False).run()
+        
+        if code==0: 
+            print("你选择退出。。。。")
+            return
+        
+        install_tool = 'aptitude'
+        install_tool_apt = 'apt'
+        if osversion.get_version() == "16.04":
+            install_tool = 'apt'
+
+        install_version = ros_name[rosname]
+
+        if install_tool=='aptitude':
+            AptUtils.install_pkg('aptitude')
+
+        # ======================================================基础版本==============================================================
+        if code==2:
+            # 第一次尝试
+            cmd_result = CmdTask("sudo {} install  {} -y".format(install_tool_apt,dic_base[install_version]),300,os_command=True).run()
+            cmd_result = CmdTask("sudo {} install  {} -y".format(install_tool_apt,dic_base[install_version]),300,os_command=False).run()
+            if FileUtils.check_result(cmd_result,['未满足的依赖关系','unmet dependencies','but it is not installable']):
+                # 尝试使用aptitude解决依赖问题
+                PrintUtils.print_warn("============================================================")
+                PrintUtils.print_delay("请注意我，检测你在安装过程中出现依赖问题，请在稍后输入n,再选择y,即可解决")
+                import time
+                input("确认了解情况，请输入回车继续安装")
+                cmd_result = CmdTask("sudo {} install   {} ".format(install_tool,dic_base[install_version]),300,os_command=True).run()
+                cmd_result = CmdTask("sudo {} install   {} -y".format(install_tool,dic_base[install_version]),300,os_command=False).run()
+        
+        # ======================================================桌面版本==============================================================
+        elif code==1:
+            cmd_result = CmdTask("sudo {} install   {} -y".format(install_tool_apt,RosVersions.get_desktop_version(install_version)),300,os_command=True).run()
+            cmd_result = CmdTask("sudo {} install   {} -y".format(install_tool_apt,RosVersions.get_desktop_version(install_version)),300,os_command=False).run()
+            if FileUtils.check_result(cmd_result,['未满足的依赖关系','unmet dependencies','but it is not installable']):
+                # 尝试使用aptitude解决依赖问题
+                PrintUtils.print_warn("============================================================")
+                PrintUtils.print_delay("请注意我，检测你在安装过程中出现依赖问题，请在稍后输入n,再选择y,即可解决（若无法解决，清在稍后手动运行命令: sudo aptitude install {})".format(RosVersions.get_desktop_version(install_version)))
+                import time
+                input("确认了解情况，请输入回车继续安装")
+                cmd_result = CmdTask("sudo {} install   {}".format(install_tool,RosVersions.get_desktop_version(install_version)),300,os_command=True).run()
+                cmd_result = CmdTask("sudo {} install   {} -y".format(install_tool,RosVersions.get_desktop_version(install_version)),300,os_command=False).run()
+
+        # apt broken error
+        if cmd_result[0]!=0:
+            if FileUtils.check_result(cmd_result,['--fix-broken install']):
+                CmdTask("sudo apt --fix-broken install -y").run()
+                if code==2: cmd_result = CmdTask("sudo {} install   {} -y".formatinstall_tool,(dic_base[rosname]),300,os_command=False).run()
+                elif code==1: cmd_result = CmdTask("sudo {} install   {} -y".format(install_tool,rosname),300,os_command=False).run()
+
+        # 安装额外的依赖
+        RosVersions.install_depend(install_version)
+
+        return install_version
+
+
+    def config_env_and_tip(self,version_name):
+        """
+        配置系统源
+        """
+        if self.install_success(version_name):
+            run_tool_file('tools.tool_config_rosenv')
+            PrintUtils.print_success("恭喜你，安装成功了，再附赠你机器人学习宝藏网站：鱼香社区:https://fishros.org.cn/forum")
+        else: PrintUtils.print_error("安装失败了,请打开鱼香社区：https://fishros.org.cn/forum 在一键安装专区反馈问题...")
+
+
+    def install_ros(self):
+        PrintUtils.print_delay('欢迎使用ROS开箱子工具，本工具由[鱼香ROS]小鱼贡献..')
+        if not self.support_install(): return False
+
+        self.check_sys_source()
+        self.add_key()
+        self.add_source()
+
+        ros_version = self.choose_and_install_ros()
+        if not ros_version:
+            return
+        self.config_env_and_tip(ros_version)
+        if self.install_success(ros_version):
+            RosVersions.tip_test_command(ros_version)
+
+
+    def run(self):
+        self.install_ros()
+
